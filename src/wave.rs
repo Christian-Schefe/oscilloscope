@@ -7,7 +7,10 @@ use bevy::{prelude::*, window::close_on_esc};
 use bevy_prototype_lyon::prelude::*;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use rustfft::{num_complex::Complex32, num_traits::Zero, *};
-use soundmaker::{daw::RenderedAudio, playback::play_and_save};
+use soundmaker::{
+    daw::{RenderedAudio, DAW},
+    playback::play_and_save,
+};
 
 use crate::line::samples_to_path;
 use std::thread;
@@ -27,17 +30,29 @@ impl Plugin for WavePlugin {
 pub struct WaveResource {
     master: Vec<(f64, f64)>,
     channels: Vec<Vec<(f64, f64)>>,
+    channel_names: Vec<String>,
 }
 
 impl WaveResource {
-    pub fn new(master: Vec<(f64, f64)>, channels: Vec<Vec<(f64, f64)>>) -> Self {
-        Self { master, channels }
+    pub fn new(
+        master: Vec<(f64, f64)>,
+        channels: Vec<Vec<(f64, f64)>>,
+        channel_names: Vec<String>,
+    ) -> Self {
+        Self {
+            master,
+            channels,
+            channel_names,
+        }
     }
 }
 
-impl From<RenderedAudio> for WaveResource {
-    fn from(render: RenderedAudio) -> Self {
-        Self::new(render.master, render.channels)
+impl From<(RenderedAudio, DAW)> for WaveResource {
+    fn from(data: (RenderedAudio, DAW)) -> Self {
+        let channel_names = (0..data.1.channel_count)
+            .map(|i| data.1[i].name.clone())
+            .collect();
+        Self::new(data.0.master, data.0.channels, channel_names)
     }
 }
 
@@ -57,7 +72,7 @@ fn setup_channels(
             let min_y = (channel_count - i) as f32 * y_spacing;
             let max_y = (channel_count + 1 - i) as f32 * y_spacing;
             let rect = Rect::new(-0.5, min_y - 0.5, 0.5, max_y - 0.5);
-            ChannelData::new(channel, "Name".to_string(), rect, 4096, 60.0)
+            ChannelData::new(channel, wave.channel_names[i].clone(), rect, 4096, 60.0)
         })
         .collect();
 
@@ -73,8 +88,9 @@ fn setup_channels(
         .par_iter_mut()
         .for_each(|x| x.precompute_indices(playback.sample_rate));
 
-    for data in channel_data {
+    for (i, data) in channel_data.into_iter().enumerate() {
         let path = PathBuilder::new().build();
+        let name = data.name.clone();
 
         commands.spawn((
             data,
@@ -86,9 +102,46 @@ fn setup_channels(
                 },
                 ..default()
             },
-            Stroke::new(Color::BLACK, 1.0),
+            Stroke::new(Color::hex("6cb8ff").unwrap(), 1.0),
             Fill::color(Color::NONE),
         ));
+
+        let min_y = i as f32 * y_spacing;
+
+        commands.spawn(TextBundle {
+            text: Text::from_section(
+                name,
+                TextStyle {
+                    font_size: 20.0,
+                    color: Color::WHITE,
+                    ..default()
+                },
+            ),
+            style: Style {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(min_y * 100.0 + 1.3),
+                left: Val::Px(10.0),
+                ..Default::default()
+            },
+
+            ..default()
+        });
+
+        if i != 0 {
+            let center_y = 100.0 * (i as f32) * y_spacing;
+            commands.spawn(NodeBundle {
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(0.0),
+                    top: Val::Percent(center_y),
+                    width: Val::Percent(100.0),
+                    height: Val::Px(2.0),
+                    ..default()
+                },
+                background_color: BackgroundColor(Color::hex("444d56").unwrap()),
+                ..default()
+            });
+        }
     }
 }
 
@@ -208,6 +261,7 @@ impl ChannelData {
         spectrum
     }
     fn get_data(&self, frame: usize) -> &[f64] {
+        let frame = frame.min(self.frame_indices.len() - 1);
         let i = self.frame_indices[frame];
         &self.data[i - self.buffer_size..i]
     }

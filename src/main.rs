@@ -1,6 +1,6 @@
-use std::{fs::File, io::Read};
+use std::{fs::File, io::Read, time::Duration};
 
-use soundmaker::prelude::{piano, render_daw, violin, DAW};
+use soundmaker::prelude::{piano, violin, DAW};
 
 mod app;
 mod fps;
@@ -27,9 +27,8 @@ fn main() {
 
     daw.set_midi_bytes(&buffer);
 
-    daw.master.volume = 0.1;
+    daw.duration = Duration::from_secs(10);
+    daw.master.volume = 0.0;
 
-    let rendered = render_daw(&mut daw, sample_rate);
-
-    app::run(rendered, sample_rate);
+    app::run(daw, sample_rate);
 }
