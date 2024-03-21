@@ -1,12 +1,10 @@
 use std::{fs::File, io::Read};
 
-use soundmaker::{
-    daw::{render_daw, DAW},
-    prelude::{piano, violin},
-};
+use soundmaker::prelude::{piano, render_daw, violin, DAW};
 
 mod app;
 mod fps;
+mod line;
 mod wave;
 
 fn main() {
@@ -28,6 +26,8 @@ fn main() {
     daw.add_instrument("Piano RH".to_string(), &piano, 2.5, 0.0);
 
     daw.set_midi_bytes(&buffer);
+
+    daw.master.volume = 0.1;
 
     let rendered = render_daw(&mut daw, sample_rate);
 

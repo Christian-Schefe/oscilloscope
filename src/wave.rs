@@ -1,10 +1,16 @@
-use std::time::Instant;
+use std::{
+    sync::mpsc::channel,
+    time::{Duration, Instant},
+};
 
-use bevy::prelude::*;
+use bevy::{prelude::*, window::close_on_esc};
 use bevy_prototype_lyon::prelude::*;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use rustfft::{num_complex::Complex32, num_traits::Zero, *};
-use soundmaker::daw::RenderedAudio;
+use soundmaker::{daw::RenderedAudio, playback::play_and_save};
+
+use crate::line::samples_to_path;
+use std::thread;
 
 pub struct WavePlugin(pub f64);
 
@@ -12,6 +18,7 @@ impl Plugin for WavePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PlaybackResource::new(self.0))
             .add_systems(Startup, (setup_channels, start_playback).chain())
+            .add_systems(Update, close_on_esc)
             .add_systems(Update, update_channel);
     }
 }
@@ -40,17 +47,27 @@ fn setup_channels(
     playback: Res<PlaybackResource>,
 ) {
     let channel_count = wave.channels.len();
+    let y_spacing = 1.0 / (channel_count + 1) as f32;
+
     let mut channel_data: Vec<ChannelData> = wave
         .channels
         .iter()
         .enumerate()
         .map(|(i, channel)| {
-            let min_y = i as f32 / channel_count as f32;
-            let max_y = (i + 1) as f32 / channel_count as f32;
-            let rect = Rect::new(0.0, min_y, 1.0, max_y);
+            let min_y = (channel_count - i) as f32 * y_spacing;
+            let max_y = (channel_count + 1 - i) as f32 * y_spacing;
+            let rect = Rect::new(-0.5, min_y - 0.5, 0.5, max_y - 0.5);
             ChannelData::new(channel, "Name".to_string(), rect, 4096, 60.0)
         })
         .collect();
+
+    channel_data.push(ChannelData::new(
+        &wave.master,
+        "Master".to_string(),
+        Rect::new(-0.5, -0.5, 0.5, y_spacing - 0.5),
+        4096,
+        60.0,
+    ));
 
     channel_data
         .par_iter_mut()
@@ -64,7 +81,7 @@ fn setup_channels(
             ShapeBundle {
                 path,
                 spatial: SpatialBundle {
-                    transform: Transform::from_xyz(0., 75., 0.),
+                    transform: Transform::from_xyz(0.0, 0.0, 0.0),
                     ..default()
                 },
                 ..default()
@@ -209,8 +226,8 @@ impl PlaybackResource {
             start_instant: Instant::now(),
         }
     }
-    pub fn start(&mut self) {
-        self.start_instant = Instant::now();
+    pub fn set_start(&mut self, instant: Instant) {
+        self.start_instant = instant;
     }
     pub fn elapsed(&self) -> f64 {
         self.start_instant.elapsed().as_secs_f64()
@@ -224,46 +241,35 @@ pub fn update_channel(
 ) {
     let elapsed = playback.elapsed();
     let w = window.single();
-    let width = w.width() as f64;
-    let height = w.height() as f64;
+    let width = w.width() as f32;
+    let height = w.height() as f32;
 
-    for (mut channel, mut path) in query.iter_mut() {
+    for (channel, mut path) in query.iter_mut() {
         let frame = (channel.target_fps * elapsed) as usize;
         let slice = channel.get_data(frame);
-        let sample_count = slice.len();
-        let points = slice
-            .iter()
-            .enumerate()
-            .map(|(i, y)| position_point01(sample_count, *y, i))
-            .collect();
 
-        let new_path = build_path(points, channel.position, width, height);
+        let new_path = samples_to_path(slice, channel.position, width, height);
         *path = new_path;
     }
 }
 
-fn position_point01(sample_count: usize, sample: f64, index: usize) -> Vec2 {
-    let x = index as f64 / (sample_count - 1) as f64;
-    let y = sample * 0.5 + 0.5;
-    Vec2::new(x as f32, y as f32)
-}
+fn start_playback(mut playback: ResMut<PlaybackResource>, data: Res<WaveResource>) {
+    let duration = data.master.len() as f64 / playback.sample_rate;
+    let data = data.master.clone();
+    let sample_rate = playback.sample_rate;
 
-fn build_path(points: Vec<Vec2>, rect: Rect, width: f64, height: f64) -> Path {
-    let mut new_points = points.into_iter().map(|point| {
-        let x = (rect.min.x + rect.width() * point.x) * width as f32;
-        let y = (rect.min.y + rect.height() * point.y) * height as f32;
-        Vec2::new(x, y)
+    let (sender, receiver) = channel();
+
+    thread::spawn(move || {
+        play_and_save(
+            data,
+            sample_rate,
+            Duration::from_secs_f64(duration),
+            "assets/output.wav".into(),
+            Some(sender),
+        )
+        .unwrap();
     });
-
-    let mut path_builder = PathBuilder::new();
-    path_builder.move_to(new_points.next().unwrap());
-    for point in new_points {
-        path_builder.line_to(point);
-    }
-    let path = path_builder.build();
-    path
-}
-
-fn start_playback(mut playback: ResMut<PlaybackResource>) {
-    playback.start();
+    let start_instant = receiver.recv().unwrap();
+    playback.set_start(start_instant);
 }

@@ -15,7 +15,7 @@ pub fn run(render: RenderedAudio, sample_rate: f64) {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Oscilloscope".to_string(),
-                present_mode: PresentMode::Mailbox,
+                present_mode: PresentMode::Fifo,
                 ..default()
             }),
             ..default()
