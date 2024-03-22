@@ -7,7 +7,12 @@ pub fn samples_to_path(samples: &[f64], rect: Rect, width: f32, height: f32) -> 
     let points: Vec<Vec2> = samples
         .iter()
         .enumerate()
-        .map(|(i, &s)| Vec2::new(i as f32, (s as f32 * 0.5 + 0.5) * sample_count))
+        .map(|(i, &s)| {
+            Vec2::new(
+                i as f32,
+                (s as f32 * 0.5 + 0.5).clamp(0.0, 1.0) * sample_count,
+            )
+        })
         .collect();
 
     let points = simplify_points(points, 0.5);
