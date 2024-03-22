@@ -273,7 +273,7 @@ impl ChannelData {
 pub struct PlaybackResource {
     sample_rate: f64,
     start_instant: Option<Instant>,
-    controller: Option<(Shared<f32>, Shared<f64>)>,
+    controller: Option<(Shared<f32>, Shared<f64>, Shared<f64>)>,
     paused_time: Option<f64>,
 }
 
@@ -298,16 +298,16 @@ impl PlaybackResource {
     pub fn pause(&mut self) {
         if let Some(controls) = &self.controller {
             controls.0.set(-1.0);
+            self.paused_time = Some(self.elapsed());
         }
-        self.paused_time = Some(self.elapsed());
     }
     pub fn unpause(&mut self) {
         if let Some(controls) = &self.controller {
             controls.0.set(1.0);
+            self.start_instant =
+                Some(Instant::now() - Duration::from_secs_f64(self.paused_time.unwrap()));
+            self.paused_time = None;
         }
-        self.start_instant =
-            Some(Instant::now() - Duration::from_secs_f64(self.paused_time.unwrap()));
-        self.paused_time = None;
     }
     pub fn toggle_pause(&mut self) {
         if self.paused_time.is_some() {
@@ -319,10 +319,16 @@ impl PlaybackResource {
     pub fn set_time(&mut self, time: f64) {
         if let Some(controls) = &self.controller {
             controls.1.set(time);
+            self.start_instant = Some(Instant::now() - Duration::from_secs_f64(time));
+            if self.paused_time.is_some() {
+                self.paused_time = Some(time);
+            }
         }
-        self.start_instant = Some(Instant::now() - Duration::from_secs_f64(time));
-        if self.paused_time.is_some() {
-            self.paused_time = Some(time);
+    }
+    pub fn mul_volume(&self, factor: f64) {
+        if let Some(controls) = &self.controller {
+            let new_volume = controls.2.value() * factor;
+            controls.2.set(new_volume.max(0.0))
         }
     }
 }
@@ -353,7 +359,7 @@ fn start_playback(mut playback: ResMut<PlaybackResource>, data: Res<WaveResource
     let (tx, rx) = channel();
 
     thread::spawn(move || {
-        play_and_save(data, sample_rate, "assets/output.wav".into(), tx).unwrap();
+        play_and_save(data, sample_rate, "./output/output.wav".into(), tx).unwrap();
     });
 
     let (start_instant, controls) = rx.recv().unwrap();
@@ -373,6 +379,20 @@ fn handle_pause_playback(
             }
             if event.key_code == KeyCode::KeyR {
                 playback.set_time(0.0)
+            }
+            if event.key_code == KeyCode::ArrowUp {
+                playback.mul_volume(1.5);
+                info!(
+                    "Volume: {}",
+                    playback.controller.as_ref().unwrap().2.value()
+                );
+            }
+            if event.key_code == KeyCode::ArrowDown {
+                playback.mul_volume(1.0 / 1.5);
+                info!(
+                    "Volume: {}",
+                    playback.controller.as_ref().unwrap().2.value()
+                );
             }
         }
     }
