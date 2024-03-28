@@ -15,7 +15,15 @@ pub fn samples_to_path(samples: &[f64], rect: Rect, width: f32, height: f32) -> 
         })
         .collect();
 
-    let points = simplify_points(points, 0.5);
+    let resampled_points: Vec<Vec2> = (0..width as usize)
+        .map(|i| {
+            let alpha = i as f32 / width;
+            let index = (alpha * sample_count) as usize;
+            points[index]
+        })
+        .collect();
+
+    let points = simplify_points(resampled_points, 0.5);
 
     // info!("simplified {} to {} points", samples.len(), points.len());
     let points = position_points(points, sample_count, rect, width, height);

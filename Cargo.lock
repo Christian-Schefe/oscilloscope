@@ -2901,11 +2901,9 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_prototype_lyon",
- "bincode",
  "geo",
  "rayon",
  "rustfft",
- "serde",
  "soundmaker",
 ]
 
@@ -3493,12 +3491,14 @@ name = "soundmaker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "cpal",
  "dyn-clone",
  "fundsp",
  "midly",
  "rand",
  "rayon",
+ "serde",
  "typenum",
 ]
 
