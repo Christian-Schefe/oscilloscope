@@ -1,29 +1,33 @@
 use std::time::Instant;
 
-use bevy::prelude::*;
+use bevy::{
+    ecs::system::CommandQueue,
+    prelude::*,
+    tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
+};
 use bevy_prototype_lyon::prelude::*;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
-use rustfft::{num_complex::Complex32, num_traits::Zero, *};
 
 use crate::{
     line::samples_to_path,
-    wave::{PlaybackResource, WaveResource},
+    wave::{start_playback, PlaybackResource, WaveResource},
 };
 
 #[derive(Component)]
 pub struct ChannelData {
     data: Vec<f64>,
+    index: usize,
     frame_indices: Vec<usize>,
     pub position: Rect,
     pub buffer_size: usize,
     pub target_fps: f64,
-    prev: (usize, Vec<Complex32>),
     pub name: String,
 }
 
 impl ChannelData {
     pub fn new(
         data: &[(f64, f64)],
+        index: usize,
         name: String,
         position: Rect,
         buffer_size: usize,
@@ -35,10 +39,10 @@ impl ChannelData {
                 .chain(data.into_iter().map(|x| (x.0 + x.1) / 2.0))
                 .chain(vec![0.0; buffer_size * 2])
                 .collect(),
+            index,
             frame_indices: Vec::new(),
             position,
             buffer_size,
-            prev: (2 * buffer_size, vec![Complex32::zero(); buffer_size]),
             name,
             target_fps,
         }
@@ -49,6 +53,7 @@ impl ChannelData {
         let mut i = 0;
         println!("Precomputing {}...", self.name);
         let start_time = Instant::now();
+        let mut prev_index = 2 * self.buffer_size;
         loop {
             let passed_time = i as f64 * secs_per_frame;
             let index = 2 * self.buffer_size + (sample_rate * passed_time) as usize;
@@ -57,8 +62,7 @@ impl ChannelData {
                 break;
             }
 
-            // let best_i = self.find_by_zero(index);
-            let best_i = self.find_by_comp(800, index);
+            let best_i = self.find_by_comp(800, index, &mut prev_index);
             let clamped_i = best_i.clamp(self.buffer_size * 2, self.data.len());
             indices.push(clamped_i);
             i += 1;
@@ -70,7 +74,7 @@ impl ChannelData {
         );
         self.frame_indices = indices;
     }
-    fn find_by_comp(&mut self, samples_per_frame: usize, index: usize) -> usize {
+    fn find_by_comp(&mut self, samples_per_frame: usize, index: usize, prev: &mut usize) -> usize {
         let data_diff = |i: usize, j: usize| -> f64 {
             (1..=self.buffer_size)
                 .map(|x| (self.data[i - x] - self.data[j - x]).abs())
@@ -89,74 +93,18 @@ impl ChannelData {
 
         let best = zeros
             .map(|x| {
-                let score = data_diff(self.prev.0, x);
+                let score = data_diff(*prev, x);
                 (score, x)
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
 
         if let Some((_, best_index)) = best {
-            self.prev.0 = best_index;
+            *prev = best_index;
         } else {
-            self.prev.0 = index;
+            *prev = index;
         }
 
-        self.prev.0 + self.buffer_size / 2
-    }
-    fn find_by_zero(&mut self, index: usize) -> usize {
-        let zeros = (0..800).filter_map(|x| {
-            let i = index - x;
-            let val = self.data[i];
-            if val >= 0.0 && self.data[i - 1] < 0.0 {
-                Some(i)
-            } else {
-                None
-            }
-        });
-
-        let best = zeros
-            .map(|x| {
-                let spectrum = Self::perform_fft(&self.data[x - self.buffer_size..x]);
-                let score = Self::cross_correlation(&self.prev.1, &spectrum);
-                (score, x, spectrum)
-            })
-            .max_by(|a, b| a.0.total_cmp(&b.0));
-
-        if let Some((_, best_index, best_spectrum)) = best {
-            self.prev = (best_index, best_spectrum);
-        } else {
-            self.prev = (
-                index,
-                Self::perform_fft(&self.data[index - self.buffer_size..index]),
-            );
-        }
-
-        self.prev.0 + self.buffer_size / 2
-    }
-    fn cross_correlation(prev_spectrum: &[Complex32], spectrum: &[Complex32]) -> f32 {
-        let mut cross_correlation = 0.0;
-        let window_size = prev_spectrum.len().min(spectrum.len());
-        for i in 0..window_size {
-            cross_correlation +=
-                prev_spectrum[i].re * spectrum[i].re + prev_spectrum[i].im * spectrum[i].im;
-        }
-        cross_correlation /= window_size as f32;
-        cross_correlation
-    }
-    fn perform_fft(samples: &[f64]) -> Vec<Complex32> {
-        let length = samples.len();
-
-        let mut spectrum: Vec<Complex32> = samples
-            .into_iter()
-            .map(|x| Complex32 {
-                re: *x as f32,
-                im: 0.0,
-            })
-            .collect();
-
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(length);
-        fft.process(&mut spectrum);
-        spectrum
+        *prev + self.buffer_size / 2
     }
     pub fn get_data(&self, frame: usize) -> &[f64] {
         let frame = frame.min(self.frame_indices.len() - 1);
@@ -184,11 +132,16 @@ pub fn update_channel(
     }
 }
 
+#[derive(Component)]
+pub struct ChannelCompute(Task<CommandQueue>);
+
 pub fn setup_channels(
     mut commands: Commands,
     wave: Res<WaveResource>,
     playback: Res<PlaybackResource>,
 ) {
+    let thread_pool = AsyncComputeTaskPool::get();
+
     let channel_count = wave.channels.len();
     let y_spacing = 1.0 / (channel_count + 1) as f32;
 
@@ -200,41 +153,103 @@ pub fn setup_channels(
             let min_y = (channel_count - i) as f32 * y_spacing;
             let max_y = (channel_count + 1 - i) as f32 * y_spacing;
             let rect = Rect::new(-0.5, min_y - 0.5, 0.5, max_y - 0.5);
-            ChannelData::new(channel, wave.channel_names[i].clone(), rect, 4096, 60.0)
+            ChannelData::new(channel, i, wave.channel_names[i].clone(), rect, 4096, 60.0)
         })
         .collect();
 
     channel_data.push(ChannelData::new(
         &wave.master,
+        channel_count,
         "Master".to_string(),
         Rect::new(-0.5, -0.5, 0.5, y_spacing - 0.5),
         4096,
         60.0,
     ));
 
-    channel_data
-        .par_iter_mut()
-        .for_each(|x| x.precompute_indices(playback.sample_rate));
+    let sample_rate = playback.sample_rate;
 
-    for (i, data) in channel_data.into_iter().enumerate() {
-        let path = PathBuilder::new().build();
-        let name = data.name.clone();
+    setup_frame(&mut commands, &channel_data);
 
-        commands.spawn((
-            data,
-            ShapeBundle {
-                path,
-                spatial: SpatialBundle {
-                    transform: Transform::from_xyz(0.0, 0.0, 0.0),
-                    ..default()
-                },
+    let entity = commands
+        .spawn(NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
-            Stroke::new(Color::hex("6cb8ff").unwrap(), 1.0),
-            Fill::color(Color::NONE),
-        ));
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn(TextBundle {
+                text: Text::from_section(
+                    "Loading...",
+                    TextStyle {
+                        font_size: 40.0,
+                        color: Color::WHITE,
+                        ..default()
+                    },
+                ),
+                ..default()
+            });
+        })
+        .id();
 
-        let min_y = i as f32 * y_spacing;
+    let task = thread_pool.spawn(async move {
+        let mut command_queue = CommandQueue::default();
+        channel_data
+            .par_iter_mut()
+            .for_each(|x| x.precompute_indices(sample_rate));
+
+        command_queue.push(move |world: &mut World| {
+            world.spawn_batch(channel_data.into_iter().map(get_bundle_for_channel));
+        });
+        command_queue.push(DespawnRecursive { entity });
+
+        command_queue
+    });
+
+    commands.entity(entity).insert(ChannelCompute(task));
+}
+
+fn get_bundle_for_channel(data: ChannelData) -> impl Bundle {
+    let path = PathBuilder::new().build();
+    (
+        data,
+        ShapeBundle {
+            path,
+            spatial: SpatialBundle {
+                transform: Transform::from_xyz(0.0, 0.0, 0.0),
+                ..default()
+            },
+            ..default()
+        },
+        Stroke::new(Color::hex("6cb8ff").unwrap(), 1.0),
+        Fill::color(Color::NONE),
+    )
+}
+
+pub fn handle_tasks(
+    mut commands: Commands,
+    mut transform_tasks: Query<&mut ChannelCompute>,
+    playback: ResMut<PlaybackResource>,
+    data: Res<WaveResource>,
+) {
+    if let Ok(mut task) = transform_tasks.get_single_mut() {
+        if let Some(mut commands_queue) = block_on(future::poll_once(&mut task.0)) {
+            commands.append(&mut commands_queue);
+            start_playback(playback, data)
+        }
+    }
+}
+
+fn setup_frame(commands: &mut Commands, channel_data: &[ChannelData]) {
+    for data in channel_data {
+        let y_spacing = 1.0 / channel_data.len() as f32;
+        let name = data.name.clone();
+        let min_y = data.index as f32 * y_spacing;
 
         commands.spawn(TextBundle {
             text: Text::from_section(
@@ -255,8 +270,8 @@ pub fn setup_channels(
             ..default()
         });
 
-        if i != 0 {
-            let center_y = 100.0 * (i as f32) * y_spacing;
+        if data.index != 0 {
+            let center_y = 100.0 * (data.index as f32) * y_spacing;
             commands.spawn(NodeBundle {
                 style: Style {
                     position_type: PositionType::Absolute,

@@ -9,8 +9,8 @@ mod channel;
 fn main() {
     let sample_rate = find_sample_rate();
 
-    let mut daw = chill_beats();
-    // let mut daw = castle();
+    // let mut daw = chill_beats();
+    let mut daw = castle();
     daw.master.volume = 1.0;
 
     app::run(daw, sample_rate);

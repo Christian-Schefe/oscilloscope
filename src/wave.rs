@@ -14,8 +14,9 @@ pub struct WavePlugin(pub f64);
 impl Plugin for WavePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PlaybackResource::new(self.0))
-            .add_systems(Startup, (setup_channels, start_playback).chain())
+            .add_systems(Startup, setup_channels)
             .add_systems(Update, close_on_esc)
+            .add_systems(Update, handle_tasks)
             .add_systems(Update, update_channel)
             .add_systems(Update, handle_pause_playback);
     }
@@ -115,7 +116,7 @@ impl PlaybackResource {
     }
 }
 
-fn start_playback(mut playback: ResMut<PlaybackResource>, data: Res<WaveResource>) {
+pub fn start_playback(mut playback: ResMut<PlaybackResource>, data: Res<WaveResource>) {
     let data = data.master.clone();
     let sample_rate = playback.sample_rate;
 
